@@ -1,6 +1,20 @@
 import { GoogleGenAI } from "@google/genai";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+export async function verifyApiKey(key: string): Promise<boolean> {
+  try {
+    const ai = new GoogleGenAI({ apiKey: key });
+    const model = ai.models.get({ model: "gemini-3-flash-preview" });
+    // Simple prompt to verify key
+    await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: { parts: [{ text: "hi" }] }
+    });
+    return true;
+  } catch (error) {
+    console.error("API Key verification failed:", error);
+    return false;
+  }
+}
 
 export async function generateRecap(
   images: { data: string; mimeType: string }[], 
@@ -8,22 +22,20 @@ export async function generateRecap(
     title?: string; 
     chapter?: string; 
     maxWords?: number; 
+    minWords?: number; 
     style?: 'santai' | 'formal';
     includeHook?: boolean;
     includeOutro?: boolean;
+    language?: string;
+    apiKeys?: string[];
+    activeKeyIndex?: number;
+    onChunk?: (chunk: string) => void;
   }
 ) {
   const model = "gemini-3-flash-preview";
-  
-  const imageParts = images.map(img => {
-    const base64Data = img.data?.includes(',') ? img.data.split(',')[1] : (img.data || '');
-    return {
-      inlineData: {
-        data: base64Data,
-        mimeType: img.mimeType
-      }
-    };
-  });
+  const outputLanguage = context?.language || 'Indonesia';
+  const apiKeys = context?.apiKeys || [];
+  let currentKeyIndex = context?.activeKeyIndex || 0;
 
   const contextInfo = (context?.title || context?.chapter) 
     ? `Manga ini berjudul "${context.title || 'Unknown'}" dan ini adalah Chapter ${context.chapter || 'N/A'}. ` 
@@ -32,13 +44,16 @@ export async function generateRecap(
   const styleInstruction = context?.style === 'formal' 
     ? 'Gunakan gaya bahasa formal, baku, dan profesional seperti narasi dokumentari serius.'
     : `Gunakan gaya bahasa SANTAI, GAUL, dan SERU seperti YouTuber recap Indonesia. 
-       Ciri khas: gunakan kata ganti seperti "cuy", "receh", "nyinyir", "gak apa-apa".
-       Contoh gaya bahasa yang diinginkan:
-       "Oke lanjut kita masuk ke part yang kedelapan cuy. Nah disini terlihat kalau di sepanjang jalan Ai seperti biasa langsung cerewet bahas hal random soal makanan gitu. Dan ya kali dengan semangat dia ngebahas tentang tiram goreng kesukaannya. Dia sampai ngebahas detail saus, dari yang rasa khas Inggris sampai ponzu yang segar, seolah-olah seperti lagi mereview makanan di acara TV gitu. Dan anehnya, justru dari ocehan receh itu, Eji ngerasa lebih tenang."`;
+       Ciri khas: gunakan kata ganti seperti "cuy", "receh", "nyinyir", "gak apa-apa".`;
 
-  const lengthInstruction = context?.maxWords 
-    ? `PENTING: Panjang naskah TIDAK BOLEH LEBIH DARI ${context.maxWords} KATA.`
-    : '';
+  let lengthInstruction = '';
+  if (context?.minWords && context?.maxWords) {
+    lengthInstruction = `PENTING: Panjang naskah HARUS DI ANTARA ${context.minWords} SAMPAI ${context.maxWords} KATA.`;
+  } else if (context?.maxWords) {
+    lengthInstruction = `PENTING: Panjang naskah TIDAK BOLEH LEBIH DARI ${context.maxWords} KATA.`;
+  } else if (context?.minWords) {
+    lengthInstruction = `PENTING: Panjang naskah MINIMAL HARUS ${context.minWords} KATA.`;
+  }
 
   const hookInstruction = context?.includeHook 
     ? '- HOOK: Buat pembukaan yang sangat menarik (pancingan) di awal naskah untuk menarik perhatian penonton dalam 10 detik pertama.' 
@@ -49,75 +64,112 @@ export async function generateRecap(
     : 'JANGAN buat bagian kalimat Penutup/Outro.';
 
   const prompt = `
-    Anda adalah asisten AI profesional yang ahli dalam membuat naskah recap manga untuk channel YouTube (seperti alur cerita manga/manhwa).
+    Anda adalah asisten AI profesional yang ahli dalam membuat naskah recap manga untuk channel YouTube.
     
     ${contextInfo}
     ${styleInstruction}
     ${lengthInstruction}
     
-    Tugas Anda:
-    1. Baca dan pahami isi dari gambar-gambar manga yang diberikan SEARA SANGAT TELITI dan BERURUTAN (urutkan dari gambar pertama sampai terakhir).
-    2. Tulis naskah recap dalam Bahasa Indonesia yang mengikuti ALUR KRONOLOGIS yang tepat berdasarkan urutan gambar tersebut. JANGAN melompat-lompat adegan.
-    3. Struktur naskah harus mengikuti aturan ini:
-       ${hookInstruction}
-       - NARASI MENDETAIL: Ceritakan ulang isi cerita dengan detail tinggi. Jelaskan apa yang terjadi di setiap panel secara berurutan. Deskripsikan aksi, perubahan ekspresi wajah karakter, emosi yang meledak-ledak, dan suasana tempat atau pertarungan. Pastikan pembaca naskah bisa merasakan perkembangan cerita dari awal sampai akhir chapter.
-       - CLIFFHANGER: Akhiran yang sangat menggantung dan membuat penasaran di bagian paling akhir gambar.
-       ${outroInstruction}
-    4. Pastikan alur cerita 100% logis dan akurat berdasarkan gambar yang diunggah.
+    ATURAN PENTING:
+    - JANGAN menuliskan judul, sub-judul, atau label bagian (seperti "**Judul**", "Bagian 1", atau label "- NARASI").
+    - JANGAN gunakan format markdown tebal (bold) untuk kalimat pembuka atau judul.
+    - Langsung mulai naskah dengan narasi alur cerita agar audiens langsung terbawa suasana.
     
-    Berikan output berupa teks murni yang siap dibaca sebagai naskah video tanpa label label teknis (seperti [Hook], [Narasi], dll) kecuali diminta, pastikan mengalir secara natural.
+    Tugas Anda:
+    1. Baca dan pahami isi dari gambar-gambar manga yang diberikan SECARA SANGAT TELITI dan BERURUTAN.
+    2. Tulis naskah recap dalam Bahasa ${outputLanguage} yang mengikuti ALUR KRONOLOGIS yang tepat.
+    3. Struktur naskah:
+       ${hookInstruction}
+       - NARASI MENDETAIL: Ceritakan ulang isi cerita dengan detail tinggi. Langsung bercerita tanpa judul.
+       - CLIFFHANGER: Akhiran yang sangat menggantung di bagian akhir gambar.
+       ${outroInstruction}
   `;
 
-  try {
-    const maxRetries = 3;
-    let attempt = 0;
+  const executeWithRetry = async (attempt: number, keyIndex: number): Promise<string | undefined> => {
+    const finalApiKey = apiKeys[keyIndex];
 
-    const executeWithRetry = async (): Promise<string | undefined> => {
-      try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: {
-            parts: [
-              ...imageParts,
-              { text: prompt }
-            ]
-          },
-        });
-        return response.text;
-      } catch (error: any) {
-        const errorMessage = error?.message || "";
-        const isRateLimit = errorMessage.includes("429") || errorMessage.includes("QUOTA");
-        const isTransient = errorMessage.includes("500") || errorMessage.includes("503") || errorMessage.includes("fetch");
-
-        if ((isRateLimit || isTransient) && attempt < maxRetries) {
-          attempt++;
-          // Exponential backoff: 2s, 4s, 8s
-          const delay = Math.pow(2, attempt) * 1000;
-          console.warn(`Attempt ${attempt} failed. Retrying in ${delay}ms...`, errorMessage);
-          await new Promise(resolve => setTimeout(resolve, delay));
-          return executeWithRetry();
+    if (!finalApiKey || finalApiKey.trim() === "") {
+        if (keyIndex + 1 < apiKeys.length) {
+            return executeWithRetry(0, keyIndex + 1);
         }
-        throw error;
-      }
-    };
+        throw new Error("API Key Gemini tidak ditemukan atau tidak valid. Silakan masukkan API Key Anda di menu Pengaturan.");
+    }
 
-    return await executeWithRetry();
-  } catch (error: any) {
-    console.error("Gemini API Error:", error);
-    
-    // Provide specific feedback based on error type
-    const errorMessage = error?.message || "";
-    
-    if (errorMessage.includes("API_KEY_INVALID")) {
-      throw new Error("Kunci API Gemini tidak valid. Mohon periksa konfigurasi API Anda.");
+    const ai = new GoogleGenAI({ apiKey: finalApiKey });
+
+    try {
+      const imageParts = images.map(img => {
+        const base64Data = img.data?.includes(',') ? img.data.split(',')[1] : (img.data || '');
+        return {
+          inlineData: {
+            data: base64Data,
+            mimeType: img.mimeType
+          }
+        };
+      });
+
+      const response = await ai.models.generateContentStream({
+        model,
+        contents: {
+          parts: [
+            ...imageParts,
+            { text: prompt }
+          ]
+        },
+      });
+
+      let fullText = "";
+      for await (const chunk of response) {
+        const text = chunk.text;
+        if (text) {
+          fullText += text;
+          if (context?.onChunk) {
+            context.onChunk(text);
+          }
+        }
+      }
+
+      return fullText;
+
+    } catch (error: any) {
+      const errorMessage = error?.message || "";
+      const status = error?.status || 0;
+      
+      // Categorize errors for better UX
+      const isInvalidKey = status === 401 || errorMessage.includes("API_KEY_INVALID") || errorMessage.includes("not valid");
+      const isQuotaExceeded = status === 429 || errorMessage.includes("QUOTA_EXCEEDED") || errorMessage.includes("rate limit");
+      const isForbidden = status === 403 || errorMessage.includes("PERMISSION_DENIED");
+      const isTransient = status >= 500 || errorMessage.includes("fetch") || errorMessage.includes("network");
+
+      // Handle Key Rotation / Retries
+      if ((isQuotaExceeded || isTransient) && keyIndex + 1 < apiKeys.length) {
+        console.warn(`Key #${keyIndex + 1} hit an issue (${status}). Switching to key #${keyIndex + 2}...`);
+        return executeWithRetry(0, keyIndex + 1);
+      }
+
+      if (isTransient && attempt < 2) {
+        const delay = Math.pow(2, attempt + 1) * 1000;
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return executeWithRetry(attempt + 1, keyIndex);
+      }
+
+      // Throw descriptive errors
+      if (isInvalidKey) {
+        throw new Error(`API Key #${keyIndex + 1} tidak valid atau salah. Periksa kembali di Pengaturan.`);
+      }
+      if (isQuotaExceeded) {
+        throw new Error(`Kuota untuk API Key #${keyIndex + 1} telah habis (Rate Limit). Coba gunakan Key lain atau tunggu beberapa saat.`);
+      }
+      if (isForbidden) {
+        throw new Error(`Akses ditolak untuk API Key #${keyIndex + 1}. Pastikan API Gemini sudah diaktifkan di Google Cloud Console.`);
+      }
+      if (isTransient) {
+        throw new Error(`Gangguan jaringan atau server Gemini sedang sibuk. Silakan coba lagi sebentar lagi.`);
+      }
+
+      throw new Error(`Terjadi kesalahan pada Key #${keyIndex + 1}: ${errorMessage}`);
     }
-    if (errorMessage.includes("429") || errorMessage.includes("QUOTA")) {
-      throw new Error("Kuota API Gemini telah habis. Silakan coba lagi nanti.");
-    }
-    if (errorMessage.includes("network") || errorMessage.includes("fetch")) {
-      throw new Error("Gagal terhubung ke layanan AI. Mohon periksa koneksi internet Anda.");
-    }
-    
-    throw new Error("Terjadi kesalahan saat memproses naskah dengan AI. Silakan coba beberapa saat lagi.");
-  }
+  };
+
+  return await executeWithRetry(0, currentKeyIndex);
 }

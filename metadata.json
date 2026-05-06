@@ -1,5 +1,5 @@
 {
-  "name": "Remix: AniKi Recap",
+  "name": "AniKi Manga Recap",
   "description": "Auto-generate YouTube-style manga recap scripts from uploaded images using Gemini AI.",
   "requestFramePermissions": [],
   "majorCapabilities": []
